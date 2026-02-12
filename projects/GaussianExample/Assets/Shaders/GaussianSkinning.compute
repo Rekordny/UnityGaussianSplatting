@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: MIT
+// Gaussian Splat Bone Skinning compute shader (position-only, following vsupersplat approach)
+// Two kernels: CSCopyBindPose (runs once) and CSBoneSkinning (runs per frame)
+
+#define GROUP_SIZE 256
+
+#pragma kernel CSCopyBindPose
+#pragma kernel CSBoneSkinning
+
+#include "Packages/org.nesnausk.gaussian-splatting/Shaders/GaussianSplatting.hlsl"
+
+// ---------- CSCopyBindPose ----------
+// Decompresses bind-pose positions from compressed buffers into Float32.
+
+RWStructuredBuffer<float3> _BindPosePos;
+uint _SplatCount;
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSCopyBindPose(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+
+    // LoadSplatPos includes chunk dequantization
+    _BindPosePos[idx] = LoadSplatPos(idx);
+}
+
+// ---------- CSBoneSkinning ----------
+// Linear Blend Skinning: position-only transform using top-4 bone weights.
+// Accumulate weighted transform matrix, normalize, then multiply position (vsupersplat approach).
+
+StructuredBuffer<float3> _BindPosePosIn;
+
+StructuredBuffer<uint4>  _BoneIndices;   // top-4 bone indices per splat
+StructuredBuffer<float4> _BoneWeights;   // top-4 bone weights per splat
+
+StructuredBuffer<float4x4> _BoneMatrices; // skinning matrices: M_current * M_bind_inv
+
+RWStructuredBuffer<float3> _SkinOutPos;
+
+uint _DebugPassthrough; // when 1, just copy bind-pose positions (skip matrix multiply)
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSBoneSkinning(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+
+    float3 bindPos = _BindPosePosIn[idx];
+
+    // Debug passthrough: just copy bind-pose position (no matrix multiply)
+    if (_DebugPassthrough)
+    {
+        _SkinOutPos[idx] = bindPos;
+        return;
+    }
+
+    uint4  boneIdx = _BoneIndices[idx];
+    float4 boneWt  = _BoneWeights[idx];
+
+    // Accumulate weighted bone transform matrix (like vsupersplat)
+    float4x4 blended = (float4x4)0;
+    float totalWeight = 0;
+
+    float w0 = boneWt.x;
+    if (w0 > 0.001)
+    {
+        blended += w0 * _BoneMatrices[boneIdx.x];
+        totalWeight += w0;
+    }
+
+    float w1 = boneWt.y;
+    if (w1 > 0.001)
+    {
+        blended += w1 * _BoneMatrices[boneIdx.y];
+        totalWeight += w1;
+    }
+
+    float w2 = boneWt.z;
+    if (w2 > 0.001)
+    {
+        blended += w2 * _BoneMatrices[boneIdx.z];
+        totalWeight += w2;
+    }
+
+    float w3 = boneWt.w;
+    if (w3 > 0.001)
+    {
+        blended += w3 * _BoneMatrices[boneIdx.w];
+        totalWeight += w3;
+    }
+
+    // Normalize and transform position
+    float3 skinnedPos;
+    if (totalWeight > 0.001)
+    {
+        blended /= totalWeight;
+        // Manual matrix-vector multiply: M * [pos, 1]
+        // blended[i] gives Unity column i (works on both DX and Metal)
+        // M * p = pos.x * col0 + pos.y * col1 + pos.z * col2 + col3
+        skinnedPos = (bindPos.x * blended[0] + bindPos.y * blended[1] + bindPos.z * blended[2] + blended[3]).xyz;
+    }
+    else
+    {
+        skinnedPos = bindPos;
+    }
+
+    _SkinOutPos[idx] = skinnedPos;
+}

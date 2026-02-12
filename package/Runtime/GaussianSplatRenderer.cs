@@ -274,6 +274,13 @@ namespace GaussianSplatting.Runtime
         GpuSorting m_Sorter;
         GpuSorting.Args m_SorterArgs;
 
+        // Dummy buffers for skinning globals (must always be bound even when skinning is inactive)
+        static GraphicsBuffer s_DummySkinPos;
+        static GraphicsBuffer s_DummySkinRot;
+        public static GraphicsBuffer s_SkinPosOverride;
+        public static GraphicsBuffer s_SkinRotOverride;
+        public static int s_SkinningActive;
+
         internal Material m_MatSplats;
         internal Material m_MatComposite;
         internal Material m_MatDebugPoints;
@@ -328,6 +335,9 @@ namespace GaussianSplatting.Runtime
             public static readonly int SelectionMode = Shader.PropertyToID("_SelectionMode");
             public static readonly int SplatPosMouseDown = Shader.PropertyToID("_SplatPosMouseDown");
             public static readonly int SplatOtherMouseDown = Shader.PropertyToID("_SplatOtherMouseDown");
+            public static readonly int SplatSkinPos = Shader.PropertyToID("_SplatSkinPos");
+            public static readonly int SplatSkinRot = Shader.PropertyToID("_SplatSkinRot");
+            public static readonly int SplatSkinningActive = Shader.PropertyToID("_SplatSkinningActive");
         }
 
         [field: NonSerialized] public bool editModified { get; private set; }
@@ -338,6 +348,14 @@ namespace GaussianSplatting.Runtime
 
         public GaussianSplatAsset asset => m_Asset;
         public int splatCount => m_SplatCount;
+
+        // Exposed for skinning system
+        public GraphicsBuffer gpuPosData => m_GpuPosData;
+        public GraphicsBuffer gpuOtherData => m_GpuOtherData;
+        public GraphicsBuffer gpuChunkData => m_GpuChunks;
+        public int gpuSplatFormat => (int)((uint)m_Asset.posFormat |
+            ((uint)m_Asset.scaleFormat << 8) | ((uint)m_Asset.shFormat << 16));
+        public int gpuChunkCount => m_GpuChunksValid ? m_GpuChunks.count : 0;
 
         enum KernelIndices
         {
@@ -418,6 +436,20 @@ namespace GaussianSplatting.Runtime
             });
 
             InitSortBuffers(splatCount);
+
+            // Ensure skinning globals are always bound (dummy when no skinning component is active)
+            InitSkinningDummyBuffers();
+        }
+
+        static void InitSkinningDummyBuffers()
+        {
+            if (s_DummySkinPos == null)
+                s_DummySkinPos = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, 12) { name = "DummySkinPos" };
+            if (s_DummySkinRot == null)
+                s_DummySkinRot = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, 16) { name = "DummySkinRot" };
+            Shader.SetGlobalInteger("_SplatSkinningActive", 0);
+            Shader.SetGlobalBuffer("_SplatSkinPos", s_DummySkinPos);
+            Shader.SetGlobalBuffer("_SplatSkinRot", s_DummySkinRot);
         }
 
         void InitSortBuffers(int count)
@@ -507,6 +539,11 @@ namespace GaussianSplatting.Runtime
             UpdateCutoutsBuffer();
             cmb.SetComputeIntParam(cs, Props.SplatCutoutsCount, m_Cutouts?.Length ?? 0);
             cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatCutouts, m_GpuEditCutouts);
+
+            // Skinning override: global buffers don't propagate via CommandBuffer, bind explicitly
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatSkinPos, s_SkinPosOverride ?? s_DummySkinPos);
+            cmb.SetComputeBufferParam(cs, kernelIndex, Props.SplatSkinRot, s_SkinRotOverride ?? s_DummySkinRot);
+            cmb.SetComputeIntParam(cs, Props.SplatSkinningActive, s_SkinningActive);
         }
 
         internal void SetAssetDataOnMaterial(MaterialPropertyBlock mat)
@@ -522,6 +559,11 @@ namespace GaussianSplatting.Runtime
             mat.SetInteger(Props.SplatFormat, (int)format);
             mat.SetInteger(Props.SplatCount, m_SplatCount);
             mat.SetInteger(Props.SplatChunkCount, m_GpuChunksValid ? m_GpuChunks.count : 0);
+
+            // Skinning override
+            mat.SetBuffer(Props.SplatSkinPos, s_SkinPosOverride ?? s_DummySkinPos);
+            mat.SetBuffer(Props.SplatSkinRot, s_SkinRotOverride ?? s_DummySkinRot);
+            mat.SetInteger(Props.SplatSkinningActive, s_SkinningActive);
         }
 
         static void DisposeBuffer(ref GraphicsBuffer buf)
@@ -629,6 +671,9 @@ namespace GaussianSplatting.Runtime
             cmd.SetComputeMatrixParam(m_CSSplatUtilities, Props.MatrixMV, worldToCamMatrix * matrix);
             cmd.SetComputeIntParam(m_CSSplatUtilities, Props.SplatCount, m_SplatCount);
             cmd.SetComputeIntParam(m_CSSplatUtilities, Props.SplatChunkCount, m_GpuChunksValid ? m_GpuChunks.count : 0);
+            // Skinning override for CalcDistances (LoadSplatPos checks _SplatSkinningActive)
+            cmd.SetComputeBufferParam(m_CSSplatUtilities, (int)KernelIndices.CalcDistances, Props.SplatSkinPos, s_SkinPosOverride ?? s_DummySkinPos);
+            cmd.SetComputeIntParam(m_CSSplatUtilities, Props.SplatSkinningActive, s_SkinningActive);
             m_CSSplatUtilities.GetKernelThreadGroupSizes((int)KernelIndices.CalcDistances, out uint gsX, out _, out _);
             cmd.DispatchCompute(m_CSSplatUtilities, (int)KernelIndices.CalcDistances, (m_GpuSortDistances.count + (int)gsX - 1)/(int)gsX, 1, 1);
 

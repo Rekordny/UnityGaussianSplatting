@@ -316,6 +316,11 @@ SplatBufferDataType _SplatSH;
 Texture2D _SplatColor;
 uint _SplatFormat;
 
+// Skinning override buffers (set globally by GaussianSplatSkinning)
+StructuredBuffer<float3> _SplatSkinPos;
+StructuredBuffer<float4> _SplatSkinRot;
+uint _SplatSkinningActive;
+
 // Match GaussianSplatAsset.VectorFormat
 #define VECTOR_FMT_32F 0
 #define VECTOR_FMT_16 1
@@ -408,6 +413,9 @@ float3 LoadSplatPosValue(uint index)
 
 float3 LoadSplatPos(uint idx)
 {
+    if (_SplatSkinningActive)
+        return _SplatSkinPos[idx];
+
     float3 pos = LoadSplatPosValue(idx);
     uint chunkIdx = idx / kChunkSize;
     if (chunkIdx < _SplatChunkCount)
@@ -603,6 +611,9 @@ SplatData LoadSplatData(uint idx)
     }
     s.opacity   = col.a;
     s.sh.col    = col.rgb;
+
+    if (_SplatSkinningActive)
+        s.pos = _SplatSkinPos[idx];
 
     return s;
 }
